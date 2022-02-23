@@ -1,0 +1,337 @@
+!/usr/bin/env python
+# coding: utf-8
+
+import wave
+import math
+import struct
+import numpy as np
+from fingerprint_new import *
+from pydub import AudioSegment
+from pydub.utils import make_chunks
+import os
+
+import tkinter as tk
+from tkinter import *
+from PIL import Image, ImageTk
+from tkinter.ttk import *
+from playsound import playsound
+from pygame import mixer
+
+
+global current_song_index
+global playlist
+global nowPlaying
+
+
+#method that gets the fingerprints
+def get_wav_channel(wav, channel, filename):
+    '''
+    Take Wave_read object as an input and save one of its
+    channels into a separate .wav file.
+    '''
+    # Read data
+    nch   = wav.getnchannels()
+    depth = wav.getsampwidth()
+    wav.setpos(0)
+    sdata = wav.readframes(wav.getnframes())
+
+    # Extract channel data (24-bit data not supported)
+    typ = { 1: np.uint8, 2: np.uint16, 4: np.uint32 }.get(depth)
+    if not typ:
+        raise ValueError("sample width {} not supported".format(depth))
+    if channel >= nch:
+        raise ValueError("cannot extract channel {} out of {}".format(channel+1, nch))
+    #print ("Extracting channel {} out of {} channels, {}-bit depth".format(channel+1, nch, depth*8))
+    data = np.fromstring(sdata, dtype=typ)
+    ch_data = data[channel::nch]
+    
+    fingerprint(ch_data, filename)
+    
+
+#method that gets first and last 10 seconds of wav audio
+def splice(filename):    
+    song = AudioSegment.from_wav(filename)
+    first_10 = song[:10000]
+    last_10 = song[-10000:]
+    
+    modified_file_name = filename[:-4]    
+    first_name = modified_file_name + "first10.wav"
+    first_10.export(first_name, format="wav") 
+    
+    last_name = modified_file_name + "last10.wav"
+    last_10.export(last_name, format="wav") 
+
+    return (first_name, last_name)
+
+
+#it should take in the txt file name
+def similarity_rate(firstfile, secondfile):
+    first_set = {''}
+    second_set = {''}
+    union_counter = 0
+    intersection_counter = 0
+    
+    with open(firstfile, 'r') as r:
+        for line in r:
+            first_tuple = line.split('(')
+            for i in range(len(first_tuple)):
+                if i > 0:
+                    first_tuple[i] = first_tuple[i][:-2]
+                    listOfTuple = first_tuple[i].split(",")
+                    tuple = (listOfTuple[0],listOfTuple[1][1:])
+                    first_set.add(tuple)
+                
+    with open(secondfile, 'r') as r:
+        for line in r:
+            second_tuple = line.split('(')
+            for i in range(len(first_tuple)):
+                if i > 0:
+                    first_tuple[i] = first_tuple[i][:-2]
+                    listOfTuple = first_tuple[i].split(",")
+                    tuple = (listOfTuple[0],listOfTuple[1][1:])
+                    second_set.add(tuple)
+            
+    #print(first_set)
+    intersection = first_set.intersection(second_set)
+    for a in intersection:
+        intersection_counter+=1
+        
+    union = first_set.union(second_set)
+    for a in union:
+        union_counter+=1
+        
+    similarity_rate = intersection_counter/union_counter 
+    
+    return similarity_rate
+
+def getSampleList():
+    last10list = []  
+    sample_list = []
+
+    for x in os.listdir('wav'):
+        if x.endswith('.wav') and "first10" not in x and "last10" not in x:
+            filename = "wav/" + x
+            
+        #gets first and last 10 seconds
+            splice(filename)
+            
+            #makes the splice names
+            filename = filename[:-4]
+            
+            first10sec = filename + 'first10.wav'
+            last10sec = filename + 'last10.wav'
+
+            #gets the fingerprint
+            firstwav = wave.open(first10sec)
+            first_finger = get_wav_channel(firstwav, 0, first10sec)
+        
+            lastwav = wave.open(last10sec)
+            last_finger = get_wav_channel(lastwav, 0 , last10sec)
+        
+
+    for x in os.listdir('txt'):
+        if x.endswith('last10.txt'):
+            last10list.append(x)
+           
+        if x.endswith('first10.txt'):
+            x = "txt/"+x
+            for i in last10list:
+                i = "txt/"+i
+                if x[5:] == i[5:]:
+                    pass
+                else:
+                    num = similarity_rate(i, x)
+                    sample_list.append(((i,x), num))
+
+    return sample_list
+
+
+def getNextSong(sample_list, last10OfSong, used_songs):
+    #loops through all the songs and returns the song with the highest simmilarity 
+    similarity_list = []
+    next_song = None
+
+    for i in range(len(sample_list)):
+        tuple,similarity = sample_list[i]
+        firstComparisonSong,secondComparisonSong = tuple
+        firstComparisonSong = "wav/" + firstComparisonSong[4:-4] + ".wav"
+        secondComparisonSong = "wav/" + secondComparisonSong[4:-4] + ".wav"
+        if firstComparisonSong == last10OfSong:
+            used = False
+            for i in used_songs:
+                if i == secondComparisonSong:
+                    used = True
+            if used == False:
+                sim_tup = (secondComparisonSong,similarity)
+                similarity_list.append(sim_tup)
+
+    similarity_list.sort(key=lambda y: y[1])
+    next_song = similarity_list[-1][0]
+    return next_song
+
+def makePlaylist(song_list):
+    playlist = []
+    song, first10,last10 = song_list[0]
+    playlist.append(song)
+    sample_list = getSampleList()
+    while len(playlist) < len(song_list):
+        next_song = getNextSong(sample_list, last10, playlist)
+        playlist.append(next_song)
+        song = next_song
+
+    for i in range(len(playlist)):
+        if "first10" in playlist[i]:
+            playlist[i] = playlist[i][:-11] + ".wav"
+    return playlist 
+
+
+def getSongList():
+    song_list = []
+ 
+    # assign directory
+    directory = 'wav'
+ 
+    #iterate over files in
+    #that directory
+    for root, dirs, files in os.walk(directory):
+        for filename in files:
+            if filename != ".DS_Store" and "first10" not in filename and "last10" not in filename:
+                filename = "wav/" + filename
+                first10, last10 = splice(filename)
+                fullformat = (filename,first10,last10)
+                song_list.append(fullformat)
+
+    return song_list
+
+def playSong():
+    global current_song_index
+    global playlist
+
+    song =  playlist[current_song_index]
+
+    mixer.music.load(song)
+    mixer.music.play()
+
+def pauseSong():
+    mixer.music.stop()
+
+def skipSong():
+    global current_song_index
+    global playlist
+    global nowPlaying
+    pauseSong()
+    current_song_index += 1
+    song = playlist[current_song_index]
+    playSong()
+    nowPlaying.configure(text="Now Playing: " + song[4:-4])
+
+def rewindSong():
+    global current_song_index
+    global playlist
+    global nowPlaying
+    pauseSong()
+    current_song_index -= 1
+    song = playlist[current_song_index]
+    playSong()
+    nowPlaying.configure(text="Now Playing: " + song[4:-4])
+
+def textListOfSongs():
+    stringListOfSongs = ""
+    for i in range(len(playlist)):
+        stringListOfSongs = stringListOfSongs + "\n" + "\n" + playlist[i][4:-4]
+    return stringListOfSongs
+
+def musicPlayerGUI():
+    global current_song_index
+    global playlist
+    global nowPlaying
+
+    mixer.init()
+    current_song_index = 0
+
+    window = tk.Tk(className='Python Examples - Window Size')
+    window.geometry("980x1000")
+
+    frame = tk.Frame()
+
+    playImage = PhotoImage(file = "play.png")
+
+    playButton = tk.Button(
+        text="Press to Play Music",
+        image = playImage,
+        bg="white",
+        fg="black",
+        command = lambda : playSong()
+    )
+
+    playButton.place(x=20, y = 300)
+
+    pauseImage = PhotoImage(file = "pause.png")
+
+    pauseButton = tk.Button(
+        text="Press to Pause Music",
+        image = pauseImage,
+        bg="white",
+        fg="black",
+        command = lambda : pauseSong()
+    )
+
+    pauseButton.place(x = 250, y = 300)
+
+    skipImage = PhotoImage(file = "skip.png")
+
+    skipButton = tk.Button(
+        text="Press to Skip Music",
+        image = skipImage,
+        bg="white",
+        fg="black",
+        command = lambda : skipSong()
+    )
+
+    skipButton.place(x = 250, y = 520)
+
+    rewindImage = PhotoImage(file = "rewind.png")
+
+    rewindButton = tk.Button(
+        text="Press to Skip Music",
+        image = rewindImage,
+        bg="white",
+        fg="black",
+        command = lambda : rewindSong()
+    )
+
+    rewindButton.place(x = 20, y = 520)
+
+    stringListOfSongs = textListOfSongs()
+
+    listOfSongs = tk.Label(
+        text=stringListOfSongs,
+        fg="black",
+        bg="white",
+        width=50,
+        height=50
+    )
+
+    listOfSongs.place(x=500,y=00)
+
+    song = playlist[current_song_index]
+
+    nowPlaying = tk.Label(
+        text="Now Playing: " + song[4:-4],
+        fg="black",
+        bg="white",
+        width=50,
+        height=5
+    )
+
+    nowPlaying.place(x=20,y=100)
+
+    frame.pack()
+
+    window.update()
+    window.mainloop()
+         
+
+song_list = getSongList()
+playlist = makePlaylist(song_list)
+musicPlayerGUI()
